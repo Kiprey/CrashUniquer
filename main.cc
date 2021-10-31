@@ -1,3 +1,5 @@
+#include <assert.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -51,7 +53,8 @@
 // 输入输出文件夹
 char *in_dir = NULL, *out_dir = NULL;
 // 限制子进程资源
-unsigned long long int exec_tmout = 0, mem_limit = 0;
+unsigned long long int exec_tmout = 0;
+bool is_child_timeout = false;
 pid_t child_pid = 0;
 // 追踪栈回溯层数
 unsigned int framenum = 6;
@@ -61,6 +64,10 @@ int child_inputarg_idx = -1;
 // 输出文件夹
 int out_dir_fd = -1;
 
+// 子进程执行情况
+enum ExecStatus { FAULT_NONE, FAULT_TMOUT, FAULT_CRASH};
+
+// 输出帮助信息
 void usage(char* procname) {
     INFO("%s [ options ] -- /path/to/fuzzed_app [ fuzzed_app_args ]\n\n"
 
@@ -70,7 +77,6 @@ void usage(char* procname) {
 
             "Execution control settings:\n"
             "  -t msec       - timeout for each run (ms)\n"
-            "  -m megs       - memory limit for child process (MB)\n\n"
 
             "Hash settings:\n"
             "  -f frames     - stack frame nums to calc crash-hash \n\n",
@@ -79,9 +85,10 @@ void usage(char* procname) {
     exit(1);
 }
 
+// 处理参数
 void parse_args(int argc, char** argv) {
     int opt;
-    while ((opt = getopt(argc, argv, "+i:o:t:m:f:")) > 0) {
+    while ((opt = getopt(argc, argv, "+i:o:t:f:")) > 0) {
         switch(opt) {
         case 'i':
             if (in_dir) FATAL("Multiple -i options not supported");
@@ -101,36 +108,6 @@ void parse_args(int argc, char** argv) {
 
             break;
 
-        }
-        case 'm': {
-
-            char suffix = 'M';
-
-            if (!strcmp(optarg, "none")) {
-                mem_limit = 0;
-                break;
-            }
-
-            if (sscanf(optarg, "%llu%c", &mem_limit, &suffix) < 1 ||
-                optarg[0] == '-') FATAL("Bad syntax used for -m");
-
-            switch (suffix) {
-
-                case 'T': case 't': mem_limit *= 1024 * 1024; break;
-                case 'G': case 'g': mem_limit *= 1024; break;
-                case 'K': case 'k': mem_limit /= 1024; break;
-                case 'M': case 'm': break;
-
-                default:  FATAL("Unsupported suffix or bad syntax for -m");
-
-            }
-
-            if (mem_limit < 5) FATAL("Dangerously low value of -m");
-
-            if (sizeof(rlim_t) == 4 && mem_limit > 2000)
-                FATAL("Value of -m out of range on 32-bit systems");
-
-            break;
         }
         case 'f':
             if (sscanf(optarg, "%u", &framenum) < 1 || optarg[0] == '-') 
@@ -161,13 +138,11 @@ void parse_args(int argc, char** argv) {
     child_args[i] = NULL;
 
     // 将获取到的参数输出
-    INFO("input dir: %s", in_dir);
-    INFO("output dir: %s", out_dir);
+    INFO("Input dir: %s", in_dir);
+    INFO("Output dir: %s", out_dir);
     if(exec_tmout > 0)
-        INFO("child exec timeout: %lld ms", exec_tmout);
-    if(mem_limit > 0)
-        INFO("child mem limit: %lld MB", mem_limit);
-    INFO("traced stack frame num: %d", framenum);
+        INFO("Child exec timeout: %lld ms", exec_tmout);
+    INFO("Traced stack frame num: %d", framenum);
     
     char* child_cmd = alloc_printf("%s", child_args[0]);;
     for(i = 1; i < argc - optind; i++) {
@@ -176,15 +151,16 @@ void parse_args(int argc, char** argv) {
         child_cmd = tmp;
     }
 
-    INFO("child cmdline: %s", child_cmd);
+    INFO("Child cmdline: %s", child_cmd);
     free(child_cmd);
 
     if(child_inputarg_idx > 0)
-        INFO("  - input arg: %d th", child_inputarg_idx);
+        INFO("  - Input arg: %d th", child_inputarg_idx);
     else
-        INFO("  - cannot detecte child input arg, stdin used");
+        INFO("  - Cannot detecte child input arg, stdin used");
 }
 
+// 处理停止信号
 void handle_stop_sig(int sig) {
   if (child_pid > 0) 
     kill(child_pid, SIGKILL);
@@ -192,14 +168,17 @@ void handle_stop_sig(int sig) {
     child_pid = 0;
 }
 
+// 处理超时信号
 void handle_timeout(int sig) {
   if (child_pid > 0) {
+    is_child_timeout = true;
     kill(child_pid, SIGKILL);
-    INFO("Handling STOP SIG, child pid %d killed.", child_pid);
+    INFO("Handling timeout, child pid %d killed.", child_pid);
     child_pid = 0;
   }
 }
 
+// 注册信号处理程序
 void setup_signal_handlers(void) {
 
   struct sigaction sa;
@@ -226,19 +205,20 @@ void setup_signal_handlers(void) {
   sigaction(SIGPIPE, &sa, NULL);
 }
 
+// 创建文件夹
 void setup_outdir_fds()
 {
-    if (mkdir(out_dir, 0700)) {
+    if (mkdir(out_dir, 0700))
         if (errno != EEXIST) 
             FATAL("Unable to create '%s'", out_dir);
-    } else {
-        out_dir_fd = open(out_dir, O_RDONLY | O_CLOEXEC);
 
-        if (out_dir_fd < 0 || flock(out_dir_fd, LOCK_EX | LOCK_NB))
-            FATAL("Unable to flock() output directory.");
-    }
+    out_dir_fd = open(out_dir, O_RDONLY | O_CLOEXEC);
+
+    if (out_dir_fd < 0 || flock(out_dir_fd, LOCK_EX | LOCK_NB))
+        FATAL("Unable to flock() output directory.");
 }
 
+// 在退出程序前回收垃圾（不回收也行其实）
 void clean_res() {
     close(out_dir_fd);
 
@@ -254,11 +234,78 @@ void clean_res() {
     }
 }
 
+// 开始运行
+ExecStatus run_target(char* args[], char** hash, char* in_fn) {
+    // 如果当前不是使用 stdin 输入，则构造子进程参数
+    char* tmp_inputarg = NULL;
+    if(child_inputarg_idx > 0) {
+        tmp_inputarg = child_args[child_inputarg_idx];
+        child_args[child_inputarg_idx] = in_fn;
+    }
+
+    ExecStatus ret_status = FAULT_NONE;
+
+    // TODO
+    
+    
+    // 记得恢复回去，以免出现 double free
+    if(child_inputarg_idx > 0)
+        child_args[child_inputarg_idx] = tmp_inputarg;
+
+    return ret_status;
+}
+
+// 批处理每个输入文件夹
 void uniqueing_crashes() {
     // 读取每个文件
-    // 构造子进程参数
-    // 调用子进程
-    // 将子进程返回的
+    struct dirent **nl;
+    int nl_cnt = scandir(in_dir, &nl, NULL, alphasort);
+    if (nl_cnt < 0)
+        FATAL("Unable to open '%s' (%s)", in_dir, strerror(errno));
+    
+    for (int i = 0; i < nl_cnt; i++) {
+        struct stat st;
+
+        char* in_fn = alloc_printf("%s/%s", in_dir, nl[i]->d_name);
+    
+        if (lstat(in_fn, &st) || access(in_fn, R_OK))
+            FATAL("Unable to access '%s' (%s)", in_fn, strerror(errno));
+
+        /* This also takes care of . and .. */
+        if (S_ISREG(st.st_mode) && st.st_size) {
+            INFO("Running %s ...", in_fn);
+
+            // 调用子进程并追踪 crash
+            char* hash = NULL;
+            ExecStatus ret = run_target(child_args, &hash, in_fn);
+
+            switch(ret) {
+            case FAULT_NONE:  
+                WARN("Cannot get crashed from %s !", in_fn); 
+                break;
+            case FAULT_TMOUT: 
+                WARN("Timeout from %s !", in_fn);
+                break;
+            case FAULT_CRASH: {
+                // 通过子进程返回的 hash 字符串，将 crash 分类
+                assert(strlen(hash) == 3*framenum);
+                // 创建文件夹
+                if (mkdirat(out_dir_fd, hash, 0700))
+                    if (errno != EEXIST) 
+                        FATAL("Unable to create '%s'", out_dir);
+
+                // 复制文件
+                char* cmd = alloc_printf("cp %s %s/%s/%s", in_fn, out_dir, hash, nl[i]->d_name);
+                if(system(cmd))
+                    WARN("system(%s) failed", cmd);
+                free(cmd);
+                break;
+            }
+            }
+        }
+        free(nl[i]); 
+        free(in_fn);
+    }
 }
 
 int main(int argc, char**argv)
