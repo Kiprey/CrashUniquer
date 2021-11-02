@@ -1,3 +1,4 @@
 .vscode/
 a.out
 main
+test/bin/*_test
