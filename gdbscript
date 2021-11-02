@@ -1,0 +1,7 @@
+echo [+] Running gdbscript...\n
+
+set follow-fork-mode parent
+
+del
+b run_target
+r -i test/test_input -o test/test_output -- test/bin/noasan_test @@

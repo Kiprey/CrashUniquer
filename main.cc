@@ -2,14 +2,18 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <signal.h>
 #include <sys/file.h>
+#include <sys/ptrace.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
+#include <sys/user.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -54,10 +58,12 @@
 char *in_dir = NULL, *out_dir = NULL;
 // 限制子进程资源
 unsigned long long int exec_tmout = 0;
-bool is_child_timeout = false;
 pid_t child_pid = 0;
+// 信号处理相关
+bool is_child_timeout = false;
+bool stop_soon = false;
 // 追踪栈回溯层数
-unsigned int framenum = 6;
+unsigned int framenum = 10;
 // 子进程参数
 char** child_args = NULL;
 int child_inputarg_idx = -1;
@@ -162,6 +168,7 @@ void parse_args(int argc, char** argv) {
 
 // 处理停止信号
 void handle_stop_sig(int sig) {
+  stop_soon = true; 
   if (child_pid > 0) 
     kill(child_pid, SIGKILL);
     INFO("Handling STOP SIG, child pid %d killed.", child_pid);
@@ -234,25 +241,172 @@ void clean_res() {
     }
 }
 
+bool get_memory_from_child(uint64_t address, uint64_t* data) {
+    assert(child_pid > 0);
+    // 必须手动清空 errno 以检测 ptrace 错误
+    errno = 0;
+    // 即便读取失败，依然会设置 data 为 -1
+    *data = ptrace(PTRACE_PEEKDATA, child_pid, address, nullptr);
+    return errno == 0;
+}
+
 // 开始运行
 ExecStatus run_target(char* args[], char** hash, char* in_fn) {
+    assert(child_inputarg_idx > 0 || in_fn); // child_inputarg_idx < 0 -> in_fn
     // 如果当前不是使用 stdin 输入，则构造子进程参数
-    char* tmp_inputarg = NULL;
-    if(child_inputarg_idx > 0) {
-        tmp_inputarg = child_args[child_inputarg_idx];
-        child_args[child_inputarg_idx] = in_fn;
+    int out_fd = -1;
+    if(child_inputarg_idx < 0) {
+        out_fd = open(in_fn, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (out_fd < 0) 
+            FATAL("Unable to create '%s'", in_fn);
     }
 
-    ExecStatus ret_status = FAULT_NONE;
+    child_pid = fork();
 
-    // TODO
-    
-    
-    // 记得恢复回去，以免出现 double free
-    if(child_inputarg_idx > 0)
-        child_args[child_inputarg_idx] = tmp_inputarg;
+    if (child_pid < 0) 
+        FATAL("fork() failed");
+    else if (child_pid == 0) {
+        if (ptrace(PTRACE_TRACEME, 0, NULL, NULL) < 0) {
+            perror("ptrace");
+            exit(1);
+        }
+        setsid();
 
-    return ret_status;
+        int dev_null_fd = open("/dev/null", O_RDWR);
+
+        dup2(dev_null_fd, 1);
+        dup2(dev_null_fd, 2);
+
+        if (out_fd < 0) {
+            dup2(dev_null_fd, 0);
+        } else {
+            dup2(out_fd, 0);
+            close(out_fd);
+        }
+
+        close(dev_null_fd);
+        close(out_dir_fd);
+        /* Set sane defaults for ASAN if nothing else specified. */
+
+        setenv("ASAN_OPTIONS", "abort_on_error=1:"
+                                "detect_leaks=0:"
+                                "symbolize=0:"
+                                "allocator_may_return_null=1", 0);
+
+        execv(args[0], args);
+
+        exit(0);
+    }
+    close(out_fd);
+    
+    // 等待到 ptrace 在 execv 时产生的 SIGTRAP 信号
+    wait(NULL);
+    // 设置子进程继续执行
+    if (ptrace(PTRACE_CONT, child_pid, NULL, NULL) < 0)
+        FATAL("PTRACE_CONT error. %s", strerror(errno));
+
+    // 启动计时器
+    is_child_timeout = 0;
+
+    struct itimerval it;
+    it.it_value.tv_sec = (exec_tmout / 1000);
+    it.it_value.tv_usec = (exec_tmout % 1000) * 1000;
+    setitimer(ITIMER_REAL, &it, NULL);
+
+    // 开始循环等待子进程结束
+    while(child_pid > 0) 
+    {
+        int status = 0;
+        
+        // 阻塞等待
+        if (waitpid(child_pid, &status, 0) <= 0) 
+            WARN("waitpid() failed: %s", strerror(errno));
+
+        // 如果 waitpid 因为子进程暂停
+        if (WIFSTOPPED(status)) 
+        {
+            // 如果 tracer 只是追踪到了 signal-delivery-stop 
+            // 则检测信号是否是我们所关心的信号 SIGILL SIGABRT SIGSEGV 
+            int stp_sig = WSTOPSIG(status);
+            if(stp_sig == SIGILL || stp_sig == SIGABRT || stp_sig == SIGSEGV)
+            {
+                // 捕获 crash，设置 hash
+                assert(child_pid > 0);
+                user_regs_struct regs;
+                if (ptrace(PTRACE_GETREGS, child_pid, nullptr, &regs) < 0)
+                    FATAL("ptrace error: %s", strerror(errno));
+
+                uint64_t bp = regs.rbp;
+
+                /**
+                 * 栈帧示意图
+                 *  +------------------+
+                 *  |                  | <- new rsp
+                 *  |   callee frame   |
+                 *  |                  |
+                 *  +------------------+
+                 *  |     old rbp      | <- new rbp
+                 *  +------------------+
+                 *  | caller ret addr  |
+                 *  +------------------+
+                 *  |                  | <- new rsp
+                 *  |   caller frame   |
+                 *  |                  |
+                 *  +------------------+
+                 *  |      .......     |
+                 * 
+                 */
+                
+                // 开始回溯栈内存
+                char* tmp_hash = alloc_printf("");
+                for(unsigned int i = 0; i < framenum; i++) {
+                    uint64_t caller_ret_addr;
+                    char* tmp_str = NULL;
+                    if(get_memory_from_child(bp + 0x8, &caller_ret_addr))
+                        tmp_str = alloc_printf("%03x%s", (uint32_t)(caller_ret_addr & 0xfff), tmp_hash);
+                    else
+                        tmp_str = alloc_printf("XXX%s", tmp_hash);
+
+                    free(tmp_hash);
+                    tmp_hash = tmp_str;
+
+                    // 更新 base pointer
+                    get_memory_from_child(bp, &bp);
+                }
+
+                // 删除可能已经设置过的 hash
+                free(*hash);
+                *hash = tmp_hash;
+            }
+
+            // 最后将信号转发回子进程，并设置子进程继续执行
+            if (ptrace(PTRACE_CONT, child_pid, NULL, stp_sig) < 0)
+                FATAL("PTRACE_CONT error. %s", strerror(errno));
+        }
+        // 如果 waitpid 不是因为子进程暂停，那么就是因为子进程退出了
+        else
+        {
+            child_pid = 0;
+            // 清空定时器
+            it.it_value.tv_sec = 0;
+            it.it_value.tv_usec = 0;
+            setitimer(ITIMER_REAL, &it, NULL);
+
+            // 这里我们只会捕获子进程的 SIGKILL SIGILL SIGABRT SIGSEGV 
+            if (WIFSIGNALED(status) && !stop_soon) {
+                int kill_signal = WTERMSIG(status);
+                if (is_child_timeout && kill_signal == SIGKILL) 
+                    return FAULT_TMOUT;
+                else {
+                    return FAULT_CRASH;
+                }
+            }
+            // 如果子进程已经结束，则直接退出
+            break;
+        }
+    }
+
+    return FAULT_NONE;
 }
 
 // 批处理每个输入文件夹
@@ -274,11 +428,29 @@ void uniqueing_crashes() {
         /* This also takes care of . and .. */
         if (S_ISREG(st.st_mode) && st.st_size) {
             INFO("Running %s ...", in_fn);
-
-            // 调用子进程并追踪 crash
+            
+            // 如果当前不是使用 stdin 输入，则构造子进程参数
             char* hash = NULL;
-            ExecStatus ret = run_target(child_args, &hash, in_fn);
+            ExecStatus ret;
 
+            if(child_inputarg_idx > 0) {
+                char* tmp_inputarg = child_args[child_inputarg_idx];
+                child_args[child_inputarg_idx] = in_fn;
+                ret = run_target(child_args, &hash, NULL); // 传个 NULL 表示第三个参数无用
+                child_args[child_inputarg_idx] = tmp_inputarg;
+            } 
+            else
+                ret = run_target(child_args, &hash, in_fn);
+            
+            // 如果用户手动终止进程
+            if(stop_soon) {
+                WARN("****** Stop by user ******");
+                for (int j = i; j < nl_cnt; j++)
+                    free(nl[j]); 
+                free(in_fn);
+                return;
+            }
+            
             switch(ret) {
             case FAULT_NONE:  
                 WARN("Cannot get crashed from %s !", in_fn); 

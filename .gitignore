@@ -2,3 +2,4 @@
 a.out
 main
 test/bin/*_test
+.gdb_history
