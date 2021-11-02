@@ -63,7 +63,7 @@ pid_t child_pid = 0;
 bool is_child_timeout = false;
 bool stop_soon = false;
 // 追踪栈回溯层数
-unsigned int framenum = 10;
+unsigned int framenum = 6;
 // 子进程参数
 char** child_args = NULL;
 int child_inputarg_idx = -1;
@@ -256,7 +256,7 @@ ExecStatus run_target(char* args[], char** hash, char* in_fn) {
     // 如果当前不是使用 stdin 输入，则构造子进程参数
     int out_fd = -1;
     if(child_inputarg_idx < 0) {
-        out_fd = open(in_fn, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        out_fd = open(in_fn, O_RDONLY | O_CLOEXEC, 0600);
         if (out_fd < 0) 
             FATAL("Unable to create '%s'", in_fn);
     }
@@ -309,9 +309,11 @@ ExecStatus run_target(char* args[], char** hash, char* in_fn) {
     is_child_timeout = 0;
 
     struct itimerval it;
+    memset(&it, 0, sizeof(it));
     it.it_value.tv_sec = (exec_tmout / 1000);
     it.it_value.tv_usec = (exec_tmout % 1000) * 1000;
-    setitimer(ITIMER_REAL, &it, NULL);
+    if(setitimer(ITIMER_REAL, &it, NULL))
+        WARN("set-setitimer fail: %s", strerror(errno));
 
     // 开始循环等待子进程结束
     while(child_pid > 0) 
@@ -388,9 +390,9 @@ ExecStatus run_target(char* args[], char** hash, char* in_fn) {
         {
             child_pid = 0;
             // 清空定时器
-            it.it_value.tv_sec = 0;
-            it.it_value.tv_usec = 0;
-            setitimer(ITIMER_REAL, &it, NULL);
+            memset(&it, 0, sizeof(it));
+            if(setitimer(ITIMER_REAL, &it, NULL))
+                WARN("clean-setitimer fail: %s", strerror(errno));
 
             // 这里我们只会捕获子进程的 SIGKILL SIGILL SIGABRT SIGSEGV 
             if (WIFSIGNALED(status) && !stop_soon) {
