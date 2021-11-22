@@ -17,7 +17,7 @@
 - 简单的编译方式
 
   ```bash
-  gcc main.cc -o main
+  gcc cpp_ptrace_version/main.cc -o main
   ```
 
 - 类似于 AFL-fuzz 的使用方式
@@ -40,7 +40,7 @@
   以下是该项目自带的一个测试样例
 
   ```bash
-  gcc main.cc -o main
+  gcc cpp_ptrace_version/main.cc -o main
 
   pushd test/bin
   ./build.sh
