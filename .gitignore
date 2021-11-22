@@ -1,6 +1,6 @@
 .vscode/
-a.out
-main
-test/bin/*_test
-test/test_output/
-.gdb_history
+**/a.out
+**/main
+**/*_test
+**/test_*/
+**/.gdb_history
