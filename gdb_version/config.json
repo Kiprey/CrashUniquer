@@ -1,0 +1,18 @@
+{
+    /* 是否启动调试输出 */
+    "is_debug": false,
+    /* 配置绑定的端口 */
+    "gdb-port": 10000,
+    /* 目标程序的命令行参数 */
+    "cmdline": "/usr/class/CrashUniquer/test/bin/asan_test /usr/class/CrashUniquer/test/.cur_input",
+    /* 目标程序输入语料的 .cur_input 路径，一定要与 cmdline 中对应的上 */
+    "cur_input_path": "/usr/class/CrashUniquer/test/.cur_input",
+    /* 存放待测试crashes的文件夹路径 */
+    "crashes_input_path": "/usr/class/CrashUniquer/test/test_input",
+    /* 存放添加上 hash 头的 crashes 的输出文件夹路径 */
+    "crashes_output_path": "/usr/class/CrashUniquer/test/test_output",
+    /* target 超时事件(s) */
+    "target_timeout" : 5,
+    /* 回溯栈帧层数 */
+    "stackframe_num": 6
+}
