@@ -1,3 +1,4 @@
+#! python3
 # encoding="utf-8"
 import gdb
 import json
@@ -16,7 +17,7 @@ tracer_sock = None
 def dump_target_info(key, val):
     global target_info
     target_info[key] = val
-    with open("target_info.json") as fp:
+    with open("target_info.json", "w") as fp:
         fp.write(json.dumps(target_info))
 
 
@@ -28,27 +29,28 @@ def save_data_and_exit(status):
         reg_info = gdb.execute("i r", to_string=True)
         bt = gdb.execute("bt " + str(config["stackframe_num"]), to_string=True)
         dump_target_info("crash", {'register_info': reg_info, 'backtrace': bt})
+        print("backtrace:\n" + bt)
     # 输出信息，关闭通信端口并退出
-    tracer_sock.send(status)
+    tracer_sock.send(status.encode())
     tracer_sock.close()
     gdb.execute("quit")
 
 
 # gdb 检测到正常退出时所执行的处理例程
 def exit_handler(event):
+    print("EXIT event detected: (exit_code {})".format(event.exit_code))
     save_data_and_exit("normal")
 
 
 # gdb 检测到停止事件时所执行的处理例程
 def stop_handler(event):
     global tracer_sock
-    print(event)
-
     if isinstance(event, gdb.SignalEvent):
-        if event.stop_signal in ["SIGABRT", "SIGSEGV"]:
+        print("STOP signal: " + event.stop_signal)
+        if event.stop_signal in ["SIGABRT", "SIGSEGV", "SIGILL"]:
             gdb.events.exited.disconnect(exit_handler)
             save_data_and_exit("crash")
-        elif event.stop_signal == "SIGINT":
+        elif event.stop_signal in ["SIGINT", "SIGKILL"]:
             gdb.events.exited.disconnect(exit_handler)
             save_data_and_exit("normal")
     else:
@@ -57,6 +59,8 @@ def stop_handler(event):
 
 # gdb 检测到加载新文件时所执行的处理例程
 def new_objfile_handler(event):
+    if event.new_objfile.is_valid():
+        print("NEW_OBJFILE detected: {}".format(event.new_objfile.filename))
     dump_target_info("target_pid", gdb.selected_inferior().pid)
 
 
@@ -81,7 +85,5 @@ gdb.events.exited.connect(exit_handler)
 gdb.events.stop.connect(stop_handler)
 gdb.events.new_objfile.connect(new_objfile_handler)
 
-# 将当前 gdb pid 写入至 target 配置文件中
-dump_target_info("gdb_pid", os.getpid())
-
-# 接下来等待触发 gdb 事件
+# 接下来等待触发 gdb 事件......
+print("Waiting for triggering gdb events...")

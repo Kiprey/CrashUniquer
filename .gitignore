@@ -3,3 +3,8 @@
 **/main
 **/*_test
 **/.gdb_history
+test/test_output
+**/.cur_input
+**/cmd.gdb
+**/target_info.json
+**/core

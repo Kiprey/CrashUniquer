@@ -18,7 +18,7 @@ import json
 class GdbTracer:
     def __init__(self):
         # 设置当前脚本所在的路径为工作路径。这样做可以避免各类相对路径的错误
-        self.workspace = os.path.realpath(__file__)
+        self.workspace = os.path.dirname(__file__)
 
         # 写入 cmd.gdb
         with open("{}/cmd.gdb".format(self.workspace), "w") as fp:
@@ -37,13 +37,13 @@ class GdbTracer:
 
         # 显示声明其他成员变量
         self.target_status = None
-
+        self.gdb_proc = None
 
     # 输出
     def log(self, data, is_debug=False):
         if is_debug and not self.config['is_debug']:
             return
-        print(data, end="")
+        print(data, end="", flush=True)
 
 
     # 创建 gdb 脚本
@@ -75,7 +75,7 @@ class GdbTracer:
             for f in files:
                 # 准备输入语料
                 cur_crash_path = os.path.join(root, f)
-                self.log("[eventloop] reproducing crash " + cur_crash_path)
+                self.log("[eventloop] reproducing crash %s \n" % cur_crash_path)
                 shutil.copyfile(cur_crash_path, self.config["cur_input_path"])
                 # 启动 gdb tracer
                 hash = self.gdb_trace()
@@ -87,8 +87,11 @@ class GdbTracer:
                 else:
                     self.log("[eventloop] %s crash hash: %s\n" % (cur_crash_path, hash))
                 # 将crash复制至输出文件夹下
+                output_path = self.config["crashes_output_path"]
+                if not os.path.exists(output_path):
+                    os.mkdir(output_path)
                 shutil.copyfile(cur_crash_path, os.path.join(
-                    self.config["crashes_output_path"], hash + "-" + f))
+                    output_path, hash + "-" + f))
 
 
     # gdb 开始检测。该函数将会返回 backtrace hash
@@ -102,34 +105,38 @@ class GdbTracer:
 
         # 开始执行 gdb
         self.target_status = "normal"
-        gdb_proc = subprocess.Popen(command, shell=True, cwd=self.workspace, stdin=subprocess.DEVNULL,
+        self.gdb_proc = subprocess.Popen(command, shell=True, cwd=self.workspace, stdin=subprocess.DEVNULL,
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.log("[trace]: Running '%s'\n" % command, True)
+        self.log("[trace] Running '%s'\n" % command, True)
 
         timer = Timer(int(self.config['target_timeout']), self.timeout_handler)
         try:
-            # 尝试与 gdb 进行握手
-            self.log("[trace]: Try handshake with gdb...", True)
-            data = self.client_sock.recv(2)
-            assert data == "ok"
-            self.client_sock.sendall("next")
+            self.log("[trace] Waiting for connection from gdb...", True)
+            client_sock, _ = self.server_sock.accept()
             self.log("done\n", True)
+
+            # 尝试与 gdb 进行握手
+            self.log("[trace] Try handshake with gdb...\n", True)
+            data = client_sock.recv(2)
+            assert data == b"OK", "The message sent from gdb is wrong"
+            client_sock.sendall(b"next")
+
             # 启动定时器
             timer.start()
+
             # 等待gdb结束
-            self.log("[trace] Waiting for gdb to exit...\n", True)
-            self.target_status = self.client_sock.recv(100)
+            self.log("[trace] Waiting for gdb to exit...", True)
+            self.target_status = client_sock.recv(100).decode()
             self.log("done\n", True)
         except Exception as e:
             self.log("exception occured\n", True)
-            self.log("[trace Exception]: %s\n" %  str(e))
+            self.log("[trace Exception] %s\n" %  str(e))
         finally:
             timer.cancel()
 
         # gdb 执行完成
-        gdb_proc.kill()
-        gdb_proc.wait()
-        self.log("[trace] gdb process was killed\n", True)
+        self.gdb_proc.kill()
+        self.gdb_proc.wait()
 
         # 过滤掉超时和正常退出的情况
         if self.target_status == "timeout":
@@ -143,11 +150,11 @@ class GdbTracer:
         # 提取 crash hash        
         crash_hash = ""
         for l in backtrace_msg.split("\n"):
-            self.log("[trace] Backtrace_msg: %s\n" % l, True)
             addr = re.findall("#\d+\s+(.*?)\s+in", l)
             if len(addr) >= 1:
-                crash_hash += addr[0][-3:]
-                self.log("[trace] Current tmp crash_hash : %s\n" % crash_hash, True)
+                cur_hash = addr[0][-3:]
+                self.log("[trace] Backtrace_msg: (%s) %s\n" % (cur_hash, l), True)
+                crash_hash += cur_hash
         return crash_hash
 
     # 超时处理例程
@@ -160,13 +167,19 @@ class GdbTracer:
 
     def quit(self):
         self.log("[trace] Try quit tracer...\n", True)
-        target_info = self.get_target_info()
-        os.kill(target_info['target_pid'], signal.SIGKILL)
-        os.kill(target_info['gdb_pid'], signal.SIGKILL)
+        try:
+            target_info = self.get_target_info()
+            os.kill(target_info['target_pid'], signal.SIGKILL)
+            self.gdb_proc.kill()
+            self.gdb_proc.wait()
+        except (FileNotFoundError, ProcessLookupError, KeyError):
+            pass
 
 if __name__ == '__main__':
     tracer = GdbTracer()
     try:
         tracer.run_eventloop()
     except KeyboardInterrupt:
+        pass
+    finally:
         tracer.quit()
