@@ -157,7 +157,7 @@ class GdbTracer:
             if len(addr) >= 1:
                 cur_hash = addr[0][-3:]
                 self.log("[trace] Backtrace_msg: (%s) %s\n" % (cur_hash, l), True)
-                crash_hash += cur_hash
+                crash_hash = cur_hash + crash_hash
         return crash_hash
 
     # 超时处理例程

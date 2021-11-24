@@ -76,7 +76,9 @@
 }
 ```
 
-之后直接执行 `gdb_version/gdbtracer.py` 即可。
+之后直接执行 `gdb_version/gdbtracer.py`。
+
+执行完成后，输出文件夹下将会存放以 `<hash>-<origin_filename>` 为文件名格式的 crashes。
 
 ## 三、存在的问题
 
