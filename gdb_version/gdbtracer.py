@@ -107,7 +107,12 @@ class GdbTracer:
         self.target_status = "normal"
 
         gdb_env = os.environ.copy()
-        gdb_env['ASAN_OPTIONS'] = "abort_on_error=1"
+        gdb_env['ASAN_OPTIONS'] = \
+            "abort_on_error=1:"\
+            "detect_leaks=0:"\
+            "symbolize=0:"\
+            "allocator_may_return_null=1"
+
         self.gdb_proc = subprocess.Popen(command, shell=True, cwd=self.workspace, env=gdb_env,
                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.log("[trace] Running '%s'\n" % command, True)
