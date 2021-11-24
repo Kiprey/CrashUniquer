@@ -105,8 +105,11 @@ class GdbTracer:
 
         # 开始执行 gdb
         self.target_status = "normal"
-        self.gdb_proc = subprocess.Popen(command, shell=True, cwd=self.workspace, stdin=subprocess.DEVNULL,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        gdb_env = os.environ.copy()
+        gdb_env['ASAN_OPTIONS'] = "abort_on_error=1"
+        self.gdb_proc = subprocess.Popen(command, shell=True, cwd=self.workspace, env=gdb_env,
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.log("[trace] Running '%s'\n" % command, True)
 
         timer = Timer(int(self.config['target_timeout']), self.timeout_handler)
