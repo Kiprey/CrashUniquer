@@ -75,14 +75,14 @@ class GdbTracer:
             for f in files:
                 # 准备输入语料
                 cur_crash_path = os.path.join(root, f)
-                self.log("[eventloop] reproducing crash %s \n" % cur_crash_path)
+                self.log("\n[eventloop] reproducing crash %s \n" % cur_crash_path)
                 shutil.copyfile(cur_crash_path, self.config["cur_input_path"])
                 # 启动 gdb tracer
                 hash = self.gdb_trace()
                 # 检测输出
-                if hash == "normal":
-                    self.log("[eventloop] %s did not crash!\n" % cur_crash_path)
-                elif hash == "timeout":
+                if hash == "NORMAL":
+                    self.log("[eventloop] %s did NOT crash!\n" % cur_crash_path)
+                elif hash == "TIMEOUT":
                     self.log("[eventloop] %s timeout!\n" % cur_crash_path)
                 else:
                     self.log("[eventloop] %s crash hash: %s\n" % (cur_crash_path, hash))
@@ -152,6 +152,8 @@ class GdbTracer:
         elif self.target_status == "normal":
             return "NORMAL"
         
+        assert self.target_status == "crash", "else what?"
+
         # 获取 crash 的栈回溯
         target_info = self.get_target_info()
         backtrace_msg = target_info["crash"]['backtrace']
