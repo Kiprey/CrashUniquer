@@ -51,7 +51,7 @@ class GdbTracer:
         data = ""
         data += "set confirm off\n"                 # 指明gdb所有要确认的地方全部为yes
         data += "set pagination off\n"              # 关闭分页显示功能
-        data += "set auto-solib-add off\n"          # 跳过加载共享库中的所有调试信息
+        data += "set auto-solib-add on\n"           # 开启加载共享库中的所有调试信息， 因为这样可以输出更多的栈帧
         data += "set disable-randomization on\n"    # 关闭ASLR
         data += "source gdb_script.py\n"            # 读取 gdb python script
         data += "run\n"                             # 开始执行
